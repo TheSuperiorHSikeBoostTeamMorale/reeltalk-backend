@@ -1,5 +1,4 @@
 flask
 yt-dlp
-openai-whisper
-torch==2.1.0
-numpy
+openai
+requests

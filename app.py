@@ -1,8 +1,8 @@
 import os
 import tempfile
 import subprocess
-import json
 from flask import Flask, request, jsonify
+from openai import OpenAI
 
 app = Flask(__name__)
 
@@ -26,8 +26,12 @@ def transcribe():
     if not url:
         return jsonify({"success": False, "error": "Missing 'url' in request body"}), 400
 
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return jsonify({"success": False, "error": "OPENAI_API_KEY not set"}), 500
+
     try:
-        transcript = _transcribe_url(url)
+        transcript = _transcribe_url(url, api_key)
         return jsonify({"success": True, "transcript": transcript})
     except Exception as exc:
         return jsonify({"success": False, "error": str(exc)}), 500
@@ -36,22 +40,19 @@ def transcribe():
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _transcribe_url(url: str) -> str:
-    """Download audio with yt-dlp, transcribe with Whisper, return text."""
-    import whisper  # imported lazily so health check starts fast
+def _transcribe_url(url: str, api_key: str) -> str:
+    client = OpenAI(api_key=api_key)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        audio_path = os.path.join(tmpdir, "audio.%(ext)s")
-        out_template = os.path.join(tmpdir, "audio")
+        audio_path = os.path.join(tmpdir, "audio.mp3")
 
-        # Download best audio-only stream
         subprocess.run(
             [
                 "yt-dlp",
                 "--no-playlist",
                 "--extract-audio",
                 "--audio-format", "mp3",
-                "--audio-quality", "5",   # ~128 kbps — good enough for speech
+                "--audio-quality", "5",
                 "--output", audio_path,
                 "--quiet",
                 url,
@@ -60,28 +61,25 @@ def _transcribe_url(url: str) -> str:
             timeout=120,
         )
 
-        # Find the downloaded file (yt-dlp fills in the extension)
-        mp3_path = out_template + ".mp3"
-        if not os.path.exists(mp3_path):
-            # Fallback: find any audio file in tmpdir
+        if not os.path.exists(audio_path):
+            # yt-dlp may append the extension itself
             candidates = [
                 os.path.join(tmpdir, f)
                 for f in os.listdir(tmpdir)
-                if f.startswith("audio.")
+                if f.startswith("audio")
             ]
             if not candidates:
                 raise RuntimeError("yt-dlp produced no output file")
-            mp3_path = candidates[0]
+            audio_path = candidates[0]
 
-        # Transcribe with Whisper (base model — fast, good accuracy for speech)
-        model = whisper.load_model("base")
-        result = model.transcribe(mp3_path, language="en", fp16=False)
-        text = result.get("text", "").strip()
+        with open(audio_path, "rb") as f:
+            result = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=f,
+                language="en",
+            )
 
-        if not text:
-            raise RuntimeError("Whisper returned an empty transcript")
-
-        return text
+        return result.text.strip()
 
 # ---------------------------------------------------------------------------
 # Entry point
